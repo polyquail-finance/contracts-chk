@@ -1533,6 +1533,8 @@ contract MasterChef is Ownable, ReentrancyGuard {
             }
         }
         user.rewardDebt = user.amount.mul(pool.accCHKPerShare).div(1e12);
+
+        updateEmissionIfNeeded();
         emit Deposit(msg.sender, _pid, _amount);
     }
 
@@ -1580,6 +1582,8 @@ contract MasterChef is Ownable, ReentrancyGuard {
 
         user_tgt.rewardDebt = user_tgt.amount.mul(pool_tgt.accCHKPerShare).div(1e12);
         user_src.rewardDebt = user_src.amount.mul(pool_src.accCHKPerShare).div(1e12);
+
+        updateEmissionIfNeeded();
         emit Compound(msg.sender, _pid_src, _pid_tgt);
     }
 
@@ -1648,11 +1652,18 @@ contract MasterChef is Ownable, ReentrancyGuard {
         emit SetFeeAddress(msg.sender, _feeAddress);
     }
 
-    //Pancake has to add hidden dummy pools inorder to alter the emission, here we make it simple and transparent to all.
     function updateEmissionRate(uint256 _CHKPerBlock) public onlyOwner {
         massUpdatePools();
         CHKPerBlock = _CHKPerBlock;
         emit UpdateEmissionRate(msg.sender, _CHKPerBlock);
+    }
+
+    // set emission rate to 0 after supply reaches cap
+    function updateEmissionIfNeeded() public {
+        if (BEP20(chk).totalSupply() < BEP20(chk).cappedSupply()) {
+            return; 
+        } 
+        updateEmissionRate(0);
     }
 
     // Only update before start of farm
