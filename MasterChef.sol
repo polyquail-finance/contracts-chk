@@ -1078,8 +1078,7 @@ contract BEP20 is Context, IBEP20, Ownable {
     }
 }
 
-// CHKToken with Governance.
-contract CHKToken is BEP20("Quail Chick", "CHK", 30000000000000000000000) {
+contract CHKToken is BEP20("Quail Chick", "CHK", 50000000000000000000000) {
     /// @notice Creates `_amount` token to `_to`. Must only be called by the owner (MasterChef).
     function mint(address _to, uint256 _amount) public onlyOwner {
         _mint(_to, _amount);
@@ -1538,6 +1537,7 @@ contract MasterChef is Ownable, ReentrancyGuard {
         emit Deposit(msg.sender, _pid, _amount);
     }
 
+    /*
     // Compound: Claim reward token from _pid_src pool and deposit reward token at _pid_tgt
     function compound(uint256 _pid_src, uint256 _pid_tgt)
         external
@@ -1586,6 +1586,7 @@ contract MasterChef is Ownable, ReentrancyGuard {
         updateEmissionIfNeeded();
         emit Compound(msg.sender, _pid_src, _pid_tgt);
     }
+    */
 
     // Withdraw tokens from MasterChef.
     function withdraw(uint256 _pid, uint256 _amount) public nonReentrant {
