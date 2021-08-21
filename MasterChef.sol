@@ -1277,11 +1277,15 @@ contract MasterChef is Ownable, ReentrancyGuard {
     mapping(address => uint256) private harvested;
 
     event Deposit(address indexed user, uint256 indexed pid, uint256 amount);
+    
+    /*
     event Compound(
         address indexed user,
         uint256 indexed _pid_src,
         uint256 indexed _pid_tgt
     );
+    */
+
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
     event EmergencyWithdraw(
         address indexed user,
