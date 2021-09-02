@@ -1535,7 +1535,12 @@ contract MasterChef is Ownable, ReentrancyGuard {
     {
         PoolInfo storage pool = poolInfo[_pid];
         if (pool.depositFeeBP > 0) {
-            return pool.depositFeeBP.sub(getDepositFeeDiscountBP(_user));
+            uint256 discount = getDepositFeeDiscountBP(_user);
+            if (pool.depositFeeBP > discount) {
+                return pool.depositFeeBP.sub(discount);
+            } else {
+                return 0;
+            }
         } else {
             return pool.depositFeeBP;
         }
@@ -1566,7 +1571,7 @@ contract MasterChef is Ownable, ReentrancyGuard {
                 address(this),
                 _amount
             );
-            _amount = pool.lpToken.balanceOf(address(this)) - balanceBefore;
+            _amount = pool.lpToken.balanceOf(address(this)).sub(balanceBefore);
             if (pool.depositFeeBP > 0) {
                 uint256 depositFeeBP = getDepositFeeBP(_pid, msg.sender);
                 // add in non-zero depositFeeBP check
