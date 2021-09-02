@@ -1243,27 +1243,25 @@ contract MasterChef is Ownable, ReentrancyGuard {
         IBEP20 lpToken; // Address of LP token contract.
         uint256 allocPoint; // How many allocation points assigned to this pool. CHKs to distribute per block.
         uint256 lastRewardBlock; // Last block number that CHKs distribution occurs.
-        uint256 accCHKPerShare; // Accumulated CHKs per share, times 1e12. See below.
-        uint16 depositFeeBP; // Deposit fee in basis points
+        uint256 accCHKPerShare; // Accumulated CHKs per share, times 1e18. See below.
+        uint256 depositFeeBP; // Deposit fee in basis points
+        uint256 lpSupply; // Balance of the lpToken
     }
 
     // The CHK TOKEN!
-    CHKToken public chk;
+    CHKToken public immutable chk;
     // Dev address.
-    address public devaddr;
+    address public devAddress;
     // CHK tokens created per block.
     uint256 public CHKPerBlock;
     // Deposit Fee address
     address public feeAddress;
 
     // Previous Masterchef Contracts
+    // deployed mc address
     address[] public prevMcAddrs;
+    // minimum amount of naitive tokens harvested to qualify for fee
     uint256[] public prevMcMinHarvest;
-    // Info on previous deployed masterchefs
-    // struct PrevMCInfo {
-    //     address mcAddr; // deployed mc address
-    //     uint256 minNaitiveHarvested; // minimum amount of naitive tokens harvested to qualify for fee
-    // }
 
     // Info of each pool.
     PoolInfo[] public poolInfo;
@@ -1277,15 +1275,6 @@ contract MasterChef is Ownable, ReentrancyGuard {
     mapping(address => uint256) private harvested;
 
     event Deposit(address indexed user, uint256 indexed pid, uint256 amount);
-    
-    /*
-    event Compound(
-        address indexed user,
-        uint256 indexed _pid_src,
-        uint256 indexed _pid_tgt
-    );
-    */
-
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
     event EmergencyWithdraw(
         address indexed user,
@@ -1295,11 +1284,24 @@ contract MasterChef is Ownable, ReentrancyGuard {
     event SetFeeAddress(address indexed user, address indexed newAddress);
     event SetDevAddress(address indexed user, address indexed newAddress);
     event UpdateEmissionRate(address indexed user, uint256 CHKPerBlock);
+    event addPool(
+        uint256 indexed pid,
+        address lpToken,
+        uint256 allocPoint,
+        uint256 depositFeeBP
+    );
+    event setPool(
+        uint256 indexed pid,
+        address lpToken,
+        uint256 allocPoint,
+        uint256 depositFeeBP
+    );
     event UpdateStartBlock(uint256 newStartBlock);
+    event CHKMintError(bytes reason);
 
     constructor(
         CHKToken _chk,
-        address _devaddr,
+        address _devAddress,
         address _feeAddress,
         uint256 _CHKPerBlock,
         uint256 _startBlock,
@@ -1310,16 +1312,21 @@ contract MasterChef is Ownable, ReentrancyGuard {
             _startBlock > block.number,
             "constructor: _startBlock needs to be in the future"
         );
-        require(
-            _prevMcAddrs.length < 5,
-            "constructor: too many previous MCs"
-        );
+        require(_prevMcAddrs.length < 5, "constructor: too many previous MCs");
         require(
             _prevMcAddrs.length == _prevMcMinHarvest.length,
             "constructor: prevMcAddrs and prevMcMinHarvest need to be of the same length"
         );
+
+        // coonstructor will fail if the prevMCAddress is invalid
+        for (uint256 i = 0; i < _prevMcAddrs.length; i++) {
+            try MasterChef(_prevMcAddrs[i]).poolLength() {} catch {
+                revert("constructor: incorrect previous MC address");
+            }
+        }
+
         chk = _chk;
-        devaddr = _devaddr;
+        devAddress = _devAddress;
         feeAddress = _feeAddress;
         CHKPerBlock = _CHKPerBlock;
         startBlock = _startBlock;
@@ -1338,11 +1345,6 @@ contract MasterChef is Ownable, ReentrancyGuard {
         return harvested[_user];
     }
 
-    // use this for testing
-    function viewBlockNumber() external view returns (uint256) {
-        return block.number;
-    }
-
     function poolLength() external view returns (uint256) {
         return poolInfo.length;
     }
@@ -1357,9 +1359,12 @@ contract MasterChef is Ownable, ReentrancyGuard {
     function add(
         uint256 _allocPoint,
         IBEP20 _lpToken,
-        uint16 _depositFeeBP,
+        uint256 _depositFeeBP,
         bool _withUpdate
-    ) public onlyOwner nonDuplicated(_lpToken) {
+    ) external onlyOwner nonDuplicated(_lpToken) {
+        // If the token does not exist, this will make sure the add function fails.
+        _lpToken.balanceOf(address(this));
+
         require(_depositFeeBP <= 400, "add: invalid deposit fee basis points");
         if (_withUpdate) {
             massUpdatePools();
@@ -1375,8 +1380,16 @@ contract MasterChef is Ownable, ReentrancyGuard {
                 allocPoint: _allocPoint,
                 lastRewardBlock: lastRewardBlock,
                 accCHKPerShare: 0,
-                depositFeeBP: _depositFeeBP
+                depositFeeBP: _depositFeeBP,
+                lpSupply: 0
             })
+        );
+
+        emit addPool(
+            poolInfo.length - 1,
+            address(_lpToken),
+            _allocPoint,
+            _depositFeeBP
         );
     }
 
@@ -1384,9 +1397,9 @@ contract MasterChef is Ownable, ReentrancyGuard {
     function set(
         uint256 _pid,
         uint256 _allocPoint,
-        uint16 _depositFeeBP,
+        uint256 _depositFeeBP,
         bool _withUpdate
-    ) public onlyOwner {
+    ) external onlyOwner {
         require(_depositFeeBP <= 400, "set: invalid deposit fee basis points");
         if (_withUpdate) {
             massUpdatePools();
@@ -1396,6 +1409,13 @@ contract MasterChef is Ownable, ReentrancyGuard {
         );
         poolInfo[_pid].allocPoint = _allocPoint;
         poolInfo[_pid].depositFeeBP = _depositFeeBP;
+
+        emit setPool(
+            _pid,
+            address(poolInfo[_pid].lpToken),
+            _allocPoint,
+            _depositFeeBP
+        );
     }
 
     // Return reward multiplier over the given _from to _to block.
@@ -1413,11 +1433,19 @@ contract MasterChef is Ownable, ReentrancyGuard {
         view
         returns (uint256)
     {
+        if (BEP20(chk).totalSupply() >= BEP20(chk).cappedSupply()) {
+            return 0;
+        }
+
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][_user];
         uint256 accCHKPerShare = pool.accCHKPerShare;
-        uint256 lpSupply = pool.lpToken.balanceOf(address(this));
-        if (block.number > pool.lastRewardBlock && lpSupply != 0) {
+
+        if (
+            block.number > pool.lastRewardBlock &&
+            pool.lpSupply != 0 &&
+            totalAllocPoint > 0
+        ) {
             uint256 multiplier = getMultiplier(
                 pool.lastRewardBlock,
                 block.number
@@ -1427,11 +1455,11 @@ contract MasterChef is Ownable, ReentrancyGuard {
                 .mul(pool.allocPoint)
                 .div(totalAllocPoint);
             accCHKPerShare = accCHKPerShare.add(
-                chkReward.mul(1e12).div(lpSupply)
+                chkReward.mul(1e18).div(pool.lpSupply)
             );
         }
-        
-        return user.amount.mul(accCHKPerShare).div(1e12).sub(user.rewardDebt);
+
+        return user.amount.mul(accCHKPerShare).div(1e18).sub(user.rewardDebt);
     }
 
     // Update reward variables for all pools. Be careful of gas spending!
@@ -1449,8 +1477,7 @@ contract MasterChef is Ownable, ReentrancyGuard {
         if (block.number <= pool.lastRewardBlock) {
             return;
         }
-        uint256 lpSupply = pool.lpToken.balanceOf(address(this));
-        if (lpSupply == 0 || pool.allocPoint == 0) {
+        if (pool.lpSupply == 0 || pool.allocPoint == 0) {
             pool.lastRewardBlock = block.number;
             return;
         }
@@ -1459,31 +1486,42 @@ contract MasterChef is Ownable, ReentrancyGuard {
             .mul(CHKPerBlock)
             .mul(pool.allocPoint)
             .div(totalAllocPoint);
-        try chk.mint(address(this), chkReward) {} catch {}
-        try chk.mint(devaddr, chkReward.div(10)) {} catch {}
+
+        // accCHKPerShare will not continue to increase after farming emissions are over
+        try chk.mint(devAddress, chkReward.div(10)) {} catch (
+            bytes memory reason
+        ) {
+            chkReward = 0;
+            emit CHKMintError(reason);
+        }
+
+        try chk.mint(address(this), chkReward) {} catch (bytes memory reason) {
+            chkReward = 0;
+            emit CHKMintError(reason);
+        }
 
         pool.accCHKPerShare = pool.accCHKPerShare.add(
-            chkReward.mul(1e12).div(lpSupply)
+            chkReward.mul(1e18).div(pool.lpSupply)
         );
 
         pool.lastRewardBlock = block.number;
     }
 
-    // Get the Deposit Fee Discount Based on
+    // Get the Deposit Fee Discount Based on Previous Harvested Amount
     function getDepositFeeDiscountBP(address _user)
         internal
         view
-        returns (uint16)
+        returns (uint256)
     {
-        uint16 totalDiscount = 0;
-        for (uint16 i = 0; i < prevMcAddrs.length; i++) {
-            // get additional 50bps of discount for each pool
+        uint256 totalDiscount = 0;
+        for (uint256 i = 0; i < prevMcAddrs.length; i++) {
+            // get additional 25bps of discount for each pool
             // where the user harvested more than the threshold amount
             if (
                 MasterChef(prevMcAddrs[i]).getUserTotalHarvested(_user) >=
                 prevMcMinHarvest[i]
             ) {
-                totalDiscount += 25;
+                totalDiscount = totalDiscount.add(25);
             }
         }
         return totalDiscount;
@@ -1493,18 +1531,18 @@ contract MasterChef is Ownable, ReentrancyGuard {
     function getDepositFeeBP(uint256 _pid, address _user)
         public
         view
-        returns (uint16)
+        returns (uint256)
     {
         PoolInfo storage pool = poolInfo[_pid];
         if (pool.depositFeeBP > 0) {
-            return pool.depositFeeBP - getDepositFeeDiscountBP(_user);
+            return pool.depositFeeBP.sub(getDepositFeeDiscountBP(_user));
         } else {
             return pool.depositFeeBP;
         }
     }
 
     // Deposit LP tokens to MasterChef for CHK allocation.
-    function deposit(uint256 _pid, uint256 _amount) public nonReentrant {
+    function deposit(uint256 _pid, uint256 _amount) external nonReentrant {
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][msg.sender];
         updatePool(_pid);
@@ -1512,7 +1550,7 @@ contract MasterChef is Ownable, ReentrancyGuard {
             uint256 pending = user
                 .amount
                 .mul(pool.accCHKPerShare)
-                .div(1e12)
+                .div(1e18)
                 .sub(user.rewardDebt);
             if (pending > 0) {
                 harvested[msg.sender] = harvested[msg.sender].add(
@@ -1521,84 +1559,43 @@ contract MasterChef is Ownable, ReentrancyGuard {
             }
         }
         if (_amount > 0) {
+            // uniswap's standard way of handling deposits
+            uint256 balanceBefore = pool.lpToken.balanceOf(address(this));
             pool.lpToken.safeTransferFrom(
                 address(msg.sender),
                 address(this),
                 _amount
             );
+            _amount = pool.lpToken.balanceOf(address(this)) - balanceBefore;
             if (pool.depositFeeBP > 0) {
                 uint256 depositFeeBP = getDepositFeeBP(_pid, msg.sender);
-                uint256 depositFee = _amount.mul(depositFeeBP).div(10000);
-                pool.lpToken.safeTransfer(feeAddress, depositFee);
-                user.amount = user.amount.add(_amount).sub(depositFee);
+                // add in non-zero depositFeeBP check
+                if (depositFeeBP > 0) {
+                    uint256 depositFee = _amount.mul(depositFeeBP).div(10000);
+                    pool.lpToken.safeTransfer(feeAddress, depositFee);
+                    user.amount = user.amount.add(_amount).sub(depositFee);
+                    pool.lpSupply = pool.lpSupply.add(_amount).sub(depositFee);
+                } else {
+                    user.amount = user.amount.add(_amount);
+                    pool.lpSupply = pool.lpSupply.add(_amount);
+                }
             } else {
                 user.amount = user.amount.add(_amount);
+                pool.lpSupply = pool.lpSupply.add(_amount);
             }
         }
-        user.rewardDebt = user.amount.mul(pool.accCHKPerShare).div(1e12);
+        user.rewardDebt = user.amount.mul(pool.accCHKPerShare).div(1e18);
 
-        updateEmissionIfNeeded();
         emit Deposit(msg.sender, _pid, _amount);
     }
 
-    /*
-    // Compound: Claim reward token from _pid_src pool and deposit reward token at _pid_tgt
-    function compound(uint256 _pid_src, uint256 _pid_tgt)
-        external
-        nonReentrant
-    {
-        PoolInfo storage pool_src = poolInfo[_pid_src];
-        UserInfo storage user_src = userInfo[_pid_src][msg.sender];
-
-        PoolInfo storage pool_tgt = poolInfo[_pid_tgt];
-        UserInfo storage user_tgt = userInfo[_pid_tgt][msg.sender];
-
-        updatePool(_pid_tgt);
-        updatePool(_pid_src);
-        
-        if (user_src.amount > 0) {
-            uint256 pending_src = user_src
-                .amount
-                .mul(pool_src.accCHKPerShare)
-                .div(1e12)
-                .sub(user_src.rewardDebt);
-
-            uint256 pending_tgt = user_tgt
-                .amount
-                .mul(pool_tgt.accCHKPerShare)
-                .div(1e12)
-                .sub(user_tgt.rewardDebt);
-
-            uint256 pending = pending_src.add(pending_tgt);
-
-            if (pending > 0) {
-                uint256 txn_amt = safeCHKTransfer(msg.sender, pending);
-                harvested[msg.sender] = harvested[msg.sender].add(txn_amt);
-                
-                pool_tgt.lpToken.safeTransferFrom(
-                    address(msg.sender),
-                    address(this),
-                    txn_amt
-                );
-                user_tgt.amount = user_tgt.amount.add(txn_amt);
-            }
-        }
-
-        user_tgt.rewardDebt = user_tgt.amount.mul(pool_tgt.accCHKPerShare).div(1e12);
-        user_src.rewardDebt = user_src.amount.mul(pool_src.accCHKPerShare).div(1e12);
-
-        updateEmissionIfNeeded();
-        emit Compound(msg.sender, _pid_src, _pid_tgt);
-    }
-    */
-
     // Withdraw tokens from MasterChef.
-    function withdraw(uint256 _pid, uint256 _amount) public nonReentrant {
+    function withdraw(uint256 _pid, uint256 _amount) external nonReentrant {
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][msg.sender];
         require(user.amount >= _amount, "withdraw: not good");
         updatePool(_pid);
-        uint256 pending = user.amount.mul(pool.accCHKPerShare).div(1e12).sub(
+        uint256 pending = user.amount.mul(pool.accCHKPerShare).div(1e18).sub(
             user.rewardDebt
         );
         if (pending > 0) {
@@ -1609,19 +1606,27 @@ contract MasterChef is Ownable, ReentrancyGuard {
         if (_amount > 0) {
             user.amount = user.amount.sub(_amount);
             pool.lpToken.safeTransfer(address(msg.sender), _amount);
+            pool.lpSupply = pool.lpSupply.sub(_amount);
         }
-        user.rewardDebt = user.amount.mul(pool.accCHKPerShare).div(1e12);
+        user.rewardDebt = user.amount.mul(pool.accCHKPerShare).div(1e18);
         emit Withdraw(msg.sender, _pid, _amount);
     }
 
     // Withdraw without caring about rewards. EMERGENCY ONLY.
-    function emergencyWithdraw(uint256 _pid) public nonReentrant {
+    function emergencyWithdraw(uint256 _pid) external nonReentrant {
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][msg.sender];
         uint256 amount = user.amount;
         user.amount = 0;
         user.rewardDebt = 0;
         pool.lpToken.safeTransfer(address(msg.sender), amount);
+
+        if (pool.lpSupply >= amount) {
+            pool.lpSupply = pool.lpSupply.sub(amount);
+        } else {
+            pool.lpSupply = 0;
+        }
+
         emit EmergencyWithdraw(msg.sender, _pid, amount);
     }
 
@@ -1644,37 +1649,43 @@ contract MasterChef is Ownable, ReentrancyGuard {
     }
 
     // Update dev address by the previous dev.
-    function dev(address _devaddr) public {
-        require(msg.sender == devaddr, "dev: wut?");
-        devaddr = _devaddr;
-        emit SetDevAddress(msg.sender, _devaddr);
+    function setDevAddress(address _devAddress) external {
+        require(
+            msg.sender == devAddress,
+            "setDevAddress: sender isn't the dev"
+        );
+        require(_devAddress != address(0), "setDevAddress: !nonzero");
+        devAddress = _devAddress;
+        emit SetDevAddress(msg.sender, _devAddress);
     }
 
-    function setFeeAddress(address _feeAddress) public {
+    function setFeeAddress(address _feeAddress) external {
         require(msg.sender == feeAddress, "setFeeAddress: FORBIDDEN");
         require(_feeAddress != address(0), "setFeeAddress: !nonzero");
         feeAddress = _feeAddress;
         emit SetFeeAddress(msg.sender, _feeAddress);
     }
 
-    function updateEmissionRate(uint256 _CHKPerBlock) public onlyOwner {
+    function updateEmissionRate(uint256 _CHKPerBlock) external onlyOwner {
+        require(
+            _CHKPerBlock <= 1 ether,
+            "updateEmissionRate: exceeds max emission rate"
+        );
         massUpdatePools();
         CHKPerBlock = _CHKPerBlock;
         emit UpdateEmissionRate(msg.sender, _CHKPerBlock);
     }
 
-    // set emission rate to 0 after supply reaches cap
-    function updateEmissionIfNeeded() public {
-        if (BEP20(chk).totalSupply() < BEP20(chk).cappedSupply()) {
-            return; 
-        } 
-        updateEmissionRate(0);
-    }
-
     // Only update before start of farm
     function updateStartBlock(uint256 _newStartBlock) external onlyOwner {
-        require(block.number < startBlock, "updateStartBlock: cannot change start block if farm has already started");
-        require(block.number < _newStartBlock, "updateStartBlock: cannot set start block in the past");
+        require(
+            block.number < startBlock,
+            "updateStartBlock: cannot change start block if farm has already started"
+        );
+        require(
+            block.number < _newStartBlock,
+            "updateStartBlock: cannot set start block in the past"
+        );
         uint256 length = poolInfo.length;
         for (uint256 pid = 0; pid < length; ++pid) {
             PoolInfo storage pool = poolInfo[pid];
